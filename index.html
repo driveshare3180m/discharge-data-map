@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>退院患者データマップ</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel-bg: #ffffff;
+    --text: #222;
+    --border: #ddd;
+  }
+  html, body { height: 100%; margin: 0; font-family: "Hiragino Kaku Gothic ProN","Meiryo",sans-serif; color: var(--text); background: var(--bg); }
+  #app { display: flex; height: 100%; }
+  #sidebar {
+    width: 280px;
+    min-width: 280px;
+    background: var(--panel-bg);
+    border-right: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+    box-sizing: border-box;
+  }
+  #map { flex: 1; }
+  h1 { font-size: 16px; margin: 0 0 4px 0; }
+  .subtitle { font-size: 12px; color: #777; margin-bottom: 16px; }
+  .section-title { font-size: 13px; font-weight: bold; margin: 16px 0 8px 0; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .month-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .month-item { display: flex; align-items: center; font-size: 13px; }
+  .month-item input { margin-right: 4px; }
+  .month-controls { display: flex; gap: 8px; margin-bottom: 8px; }
+  .month-controls button {
+    font-size: 12px; padding: 4px 8px; border: 1px solid var(--border);
+    background: #fafafa; border-radius: 4px; cursor: pointer;
+  }
+  .month-controls button:hover { background: #eee; }
+  .legend-item { display: flex; align-items: center; font-size: 12px; margin-bottom: 6px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
+  #status { font-size: 12px; color: #888; margin-top: 16px; line-height: 1.5; }
+  #status.error { color: #c0392b; }
+  .donut-label {
+    font-size: 10px; font-weight: bold; fill: #333;
+    text-anchor: middle; dominant-baseline: central;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1>退院患者データマップ</h1>
+    <div class="subtitle">郵便番号ごとの退院患者数（円の大きさ＝件数、色＝診療科構成）</div>
+
+    <div class="section-title">退院月</div>
+    <div class="month-controls">
+      <button id="monthAll">全選択</button>
+      <button id="monthNone">全解除</button>
+    </div>
+    <div class="month-grid" id="monthGrid"></div>
+
+    <div class="section-title">診療科（色）</div>
+    <div id="legend"></div>
+
+    <div id="status">読み込み中...</div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script>
+/* ==== ここを、GASのウェブアプリ公開URLに書き換えてください ==== */
+const API_URL = 'https://script.google.com/macros/s/AKfycbw2NDXFLgkgTxYIKg8PA6aa5SIEDZuh3hPPVgpZMi-nko_2OdngbcW6Fy193sunOKaD/exec';
+
+/* 診療科の色パレット（不足時は自動的に色を巡回生成） */
+const PALETTE = [
+  '#e6194B', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+  '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+  '#dcbeff', '#9A6324', '#800000', '#aaffc3', '#808000',
+  '#ffd8b1', '#000075', '#a9a9a9', '#e6beff', '#ffe119'
+];
+
+let map, layerGroup;
+let allPoints = [];
+let deptColor = {};
+let selectedMonths = new Set();
+
+function colorForDept(dept) {
+  return deptColor[dept] || '#999999';
+}
+
+async function init() {
+  map = L.map('map').setView([36.65, 138.18], 9); // 長野市付近を初期表示
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+  layerGroup = L.layerGroup().addTo(map);
+
+  const statusEl = document.getElementById('status');
+  try {
+    const res = await fetch(API_URL);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    allPoints = data.points;
+    data.departments.forEach((d, i) => {
+      deptColor[d] = PALETTE[i % PALETTE.length];
+    });
+    buildLegend(data.departments);
+    buildMonthCheckboxes(data.months);
+    selectedMonths = new Set(data.months);
+
+    statusEl.textContent =
+      `郵便番号 ${allPoints.length} 件を表示中` +
+      (data.unmatchedZipCount ? `（対象県外など ${data.unmatchedZipCount} 件は郵便番号マスタに無いため除外）` : '') +
+      `\n最終取得: ${new Date(data.generatedAt).toLocaleString('ja-JP')}`;
+
+    render();
+  } catch (err) {
+    statusEl.textContent = 'データの取得に失敗しました: ' + err.message +
+      '\n（index.html 冒頭の API_URL が正しいGASウェブアプリURLになっているか確認してください）';
+    statusEl.classList.add('error');
+  }
+}
+
+function buildLegend(departments) {
+  const legend = document.getElementById('legend');
+  legend.innerHTML = '';
+  departments.forEach(d => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<span class="legend-swatch" style="background:${colorForDept(d)}"></span>${escapeHtml(d)}`;
+    legend.appendChild(item);
+  });
+}
+
+function buildMonthCheckboxes(months) {
+  const grid = document.getElementById('monthGrid');
+  grid.innerHTML = '';
+  months.forEach(m => {
+    const id = 'month_' + m;
+    const wrap = document.createElement('label');
+    wrap.className = 'month-item';
+    wrap.innerHTML = `<input type="checkbox" id="${id}" checked> ${m}月`;
+    grid.appendChild(wrap);
+    wrap.querySelector('input').addEventListener('change', (e) => {
+      if (e.target.checked) selectedMonths.add(m);
+      else selectedMonths.delete(m);
+      render();
+    });
+  });
+
+  document.getElementById('monthAll').addEventListener('click', () => {
+    months.forEach(m => selectedMonths.add(m));
+    grid.querySelectorAll('input').forEach(cb => cb.checked = true);
+    render();
+  });
+  document.getElementById('monthNone').addEventListener('click', () => {
+    selectedMonths.clear();
+    grid.querySelectorAll('input').forEach(cb => cb.checked = false);
+    render();
+  });
+}
+
+/* 選択中の月だけを合算して、郵便番号ごとの診療科別件数を作る */
+function aggregateForSelection() {
+  const result = []; // { lat, lng, zip, total, byDept: {dept:count} }
+  for (const p of allPoints) {
+    const byDept = {};
+    let total = 0;
+    for (const monthKey in p.months) {
+      if (!selectedMonths.has(Number(monthKey))) continue;
+      const deptCounts = p.months[monthKey];
+      for (const dept in deptCounts) {
+        byDept[dept] = (byDept[dept] || 0) + deptCounts[dept];
+        total += deptCounts[dept];
+      }
+    }
+    if (total > 0) {
+      result.push({ lat: p.lat, lng: p.lng, zip: p.zip, total, byDept });
+    }
+  }
+  return result;
+}
+
+function render() {
+  layerGroup.clearLayers();
+  const points = aggregateForSelection();
+  const maxTotal = Math.max(1, ...points.map(p => p.total));
+
+  points.forEach(p => {
+    const radius = sizeForTotal(p.total, maxTotal);
+    const icon = L.divIcon({
+      className: '',
+      html: donutSvg(p.byDept, p.total, radius),
+      iconSize: [radius * 2, radius * 2],
+      iconAnchor: [radius, radius]
+    });
+    const marker = L.marker([p.lat, p.lng], { icon });
+    marker.bindTooltip(tooltipHtml(p), { direction: 'top', offset: [0, -radius] });
+    marker.addTo(layerGroup);
+  });
+}
+
+function sizeForTotal(total, maxTotal) {
+  const minR = 10, maxR = 34;
+  const ratio = Math.sqrt(total / maxTotal); // 面積が件数に比例するようスケーリング
+  return Math.round(minR + (maxR - minR) * ratio);
+}
+
+function tooltipHtml(p) {
+  const lines = Object.entries(p.byDept)
+    .sort((a, b) => b[1] - a[1])
+    .map(([d, c]) => `${escapeHtml(d)}: ${c}件`)
+    .join('<br>');
+  return `<b>${escapeHtml(p.zip)}</b><br>合計 ${p.total}件<br>${lines}`;
+}
+
+/* 郵便番号1件分のドーナツ型SVGを生成する */
+function donutSvg(byDept, total, radius) {
+  const size = radius * 2;
+  const cx = radius, cy = radius;
+  const outerR = radius - 1;
+  const innerR = outerR * 0.55;
+
+  const entries = Object.entries(byDept).sort((a, b) => b[1] - a[1]);
+  let angleStart = -Math.PI / 2; // 12時方向から開始
+  let paths = '';
+
+  if (entries.length === 1) {
+    // 1診療科のみの場合はリング全体を1色で描画（弧の描画誤差を避ける）
+    const color = colorForDept(entries[0][0]);
+    paths = `<circle cx="${cx}" cy="${cy}" r="${(outerR + innerR) / 2}" fill="none" stroke="${color}" stroke-width="${outerR - innerR}" />`;
+  } else {
+    entries.forEach(([dept, count]) => {
+      const fraction = count / total;
+      const angleEnd = angleStart + fraction * 2 * Math.PI;
+      paths += arcPath(cx, cy, outerR, innerR, angleStart, angleEnd, colorForDept(dept));
+      angleStart = angleEnd;
+    });
+  }
+
+  const label = total <= 999 ? total : '999+';
+  return `
+    <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
+      ${paths}
+      <text x="${cx}" y="${cy}" class="donut-label" style="font-size:${Math.max(8, radius * 0.45)}px;">${label}</text>
+    </svg>`;
+}
+
+function arcPath(cx, cy, outerR, innerR, startAngle, endAngle, color) {
+  const p1o = polar(cx, cy, outerR, startAngle);
+  const p2o = polar(cx, cy, outerR, endAngle);
+  const p1i = polar(cx, cy, innerR, endAngle);
+  const p2i = polar(cx, cy, innerR, startAngle);
+  const largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+  const d = [
+    `M ${p1o.x} ${p1o.y}`,
+    `A ${outerR} ${outerR} 0 ${largeArc} 1 ${p2o.x} ${p2o.y}`,
+    `L ${p1i.x} ${p1i.y}`,
+    `A ${innerR} ${innerR} 0 ${largeArc} 0 ${p2i.x} ${p2i.y}`,
+    'Z'
+  ].join(' ');
+  return `<path d="${d}" fill="${color}" stroke="#fff" stroke-width="0.5" />`;
+}
+
+function polar(cx, cy, r, angle) {
+  return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+init();
+</script>
+</body>
+</html>
