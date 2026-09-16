@@ -61,7 +61,11 @@
     </div>
     <div class="month-grid" id="monthGrid"></div>
 
-    <div class="section-title">診療科（色）</div>
+    <div class="section-title">診療科</div>
+    <div class="month-controls">
+      <button id="deptAll">全選択</button>
+      <button id="deptNone">全解除</button>
+    </div>
     <div id="legend"></div>
 
     <div id="status">読み込み中...</div>
@@ -85,6 +89,7 @@ let map, layerGroup;
 let allPoints = [];
 let deptColor = {};
 let selectedMonths = new Set();
+let selectedDepts = new Set();
 
 function colorForDept(dept) {
   return deptColor[dept] || '#999999';
@@ -111,6 +116,7 @@ async function init() {
     buildLegend(data.departments);
     buildMonthCheckboxes(data.months);
     selectedMonths = new Set(data.months);
+    selectedDepts = new Set(data.departments);
 
     statusEl.textContent =
       `郵便番号 ${allPoints.length} 件を表示中` +
@@ -129,10 +135,29 @@ function buildLegend(departments) {
   const legend = document.getElementById('legend');
   legend.innerHTML = '';
   departments.forEach(d => {
-    const item = document.createElement('div');
+    const id = 'dept_' + encodeURIComponent(d);
+    const item = document.createElement('label');
     item.className = 'legend-item';
-    item.innerHTML = `<span class="legend-swatch" style="background:${colorForDept(d)}"></span>${escapeHtml(d)}`;
+    item.innerHTML =
+      `<input type="checkbox" id="${id}" checked style="margin-right:6px;">` +
+      `<span class="legend-swatch" style="background:${colorForDept(d)}"></span>${escapeHtml(d)}`;
     legend.appendChild(item);
+    item.querySelector('input').addEventListener('change', (e) => {
+      if (e.target.checked) selectedDepts.add(d);
+      else selectedDepts.delete(d);
+      render();
+    });
+  });
+
+  document.getElementById('deptAll').addEventListener('click', () => {
+    departments.forEach(d => selectedDepts.add(d));
+    legend.querySelectorAll('input').forEach(cb => cb.checked = true);
+    render();
+  });
+  document.getElementById('deptNone').addEventListener('click', () => {
+    selectedDepts.clear();
+    legend.querySelectorAll('input').forEach(cb => cb.checked = false);
+    render();
   });
 }
 
@@ -174,6 +199,7 @@ function aggregateForSelection() {
       if (!selectedMonths.has(Number(monthKey))) continue;
       const deptCounts = p.months[monthKey];
       for (const dept in deptCounts) {
+        if (!selectedDepts.has(dept)) continue;
         byDept[dept] = (byDept[dept] || 0) + deptCounts[dept];
         total += deptCounts[dept];
       }
